@@ -16,7 +16,7 @@ config:
       save:
         dtype: float16
         save_every: 250
-        max_step_saves_to_keep: 100000
+        max_step_saves_to_keep: 5
       datasets:
         - folder_path: "{dataset_path}"
           caption_ext: txt
