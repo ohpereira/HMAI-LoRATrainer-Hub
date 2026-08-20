@@ -123,6 +123,8 @@ class TrainingJob:
     validate_only: bool = False
     # Optional private object prefix supplied by the trusted orchestrator.
     output_prefix: str | None = None
+    # Trusted callback for sanitized progress events only.
+    progress_webhook_url: str | None = None
 
     @property
     def is_wan22(self) -> bool:
@@ -398,6 +400,12 @@ def validate_payload(raw: dict[str, Any]) -> TrainingJob:
         ):
             raise PayloadError("output_prefix must be a safe relative prefix ending in '/'")
 
+    progress_webhook_url = raw.get("progress_webhook_url")
+    if progress_webhook_url is not None:
+        if not isinstance(progress_webhook_url, str) or not progress_webhook_url.startswith("https://"):
+            raise PayloadError("progress_webhook_url must be an HTTPS URL")
+        progress_webhook_url = progress_webhook_url.strip()
+
     job_id = raw.get("job_id", os.environ.get("RUNPOD_POD_ID", "local"))
     if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
         raise PayloadError("job_id contains invalid characters")
@@ -413,6 +421,7 @@ def validate_payload(raw: dict[str, Any]) -> TrainingJob:
         smoke=smoke,
         validate_only=validate_only,
         output_prefix=output_prefix,
+        progress_webhook_url=progress_webhook_url,
     )
 
 

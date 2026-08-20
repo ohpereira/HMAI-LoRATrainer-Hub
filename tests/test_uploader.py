@@ -52,17 +52,18 @@ def _make_uploads_dir(job: TrainingJob) -> Path:
 
 
 class TestUploadFile:
-    def test_upload_called_correctly(self, mock_env_s3):
+    def test_upload_called_correctly(self, mock_env_s3, tmp_path):
         from uploader import upload_file
 
         mock_s3 = MagicMock()
-        path = Path("/tmp/test.safetensors")
+        path = tmp_path / "test.safetensors"
+        path.write_bytes(b"test")
 
         upload_file(mock_s3, "test-bucket", path, "lora/test.safetensors")
 
-        mock_s3.upload_file.assert_called_once_with(
-            str(path), "test-bucket", "lora/test.safetensors"
-        )
+        mock_s3.put_object.assert_called_once()
+        assert mock_s3.put_object.call_args.kwargs["Bucket"] == "test-bucket"
+        assert mock_s3.put_object.call_args.kwargs["Key"] == "lora/test.safetensors"
 
 
 class TestPresignedUrl:
@@ -277,7 +278,7 @@ class TestMaybeUploadOutputs:
 
         with patch("uploader.boto3.client") as mock_boto:
             mock_s3 = MagicMock()
-            mock_s3.upload_file.side_effect = Exception("Network error")
+            mock_s3.put_object.side_effect = Exception("Network error")
             mock_boto.return_value = mock_s3
 
             result = maybe_upload_outputs(job)
@@ -325,9 +326,35 @@ class TestMaybeUploadOutputs:
 
             maybe_upload_outputs(job)
 
-        call_args = mock_s3.upload_file.call_args_list[0]
-        s3_key = call_args[0][2]  # positional: (local, bucket, key)
+        call_args = mock_s3.put_object.call_args_list[0]
+        s3_key = call_args.kwargs["Key"]
         assert "test-job" in s3_key
+
+
+class TestRecoverOutputs:
+    def test_reuploads_staged_checkpoints_from_previous_job(self, tmp_path, mock_env_s3, monkeypatch):
+        from uploader import recover_outputs
+
+        source_job_id = "11111111-1111-4111-8111-111111111111-u1"
+        uploads_dir = tmp_path / "jobs" / source_job_id / UPLOADS_SUBDIR
+        uploads_dir.mkdir(parents=True)
+        (uploads_dir / "testword_krea2_epoch100.safetensors").write_bytes(b"\x00" * 100)
+        monkeypatch.setenv("VOLUME_ROOT", str(tmp_path))
+
+        with patch("uploader.boto3.client") as mock_boto:
+            mock_s3 = MagicMock()
+            mock_s3.generate_presigned_url.return_value = "https://presigned"
+            mock_boto.return_value = mock_s3
+
+            result = recover_outputs(
+                source_job_id,
+                "private/lora-training/user/job/outputs/",
+            )
+
+        assert result["output_files"][0]["s3_key"] == (
+            "private/lora-training/user/job/outputs/testword_krea2_epoch100.safetensors"
+        )
+        assert mock_s3.put_object.call_count == 1
 
 
 class TestUploadAndPresign:

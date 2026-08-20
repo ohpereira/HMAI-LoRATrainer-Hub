@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 
 import boto3
+from botocore.config import Config
 from loguru import logger
 
 from config import UPLOADS_SUBDIR, TrainingJob
+
+
+MAX_SINGLE_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024
 
 
 def _get_s3_client():
@@ -29,6 +34,7 @@ def _get_s3_client():
             aws_secret_access_key=r2_secret,
             endpoint_url=f"https://{r2_account}.r2.cloudflarestorage.com",
             region_name="auto",
+            config=Config(retries={"max_attempts": 8, "mode": "standard"}),
         )
         return client, r2_bucket, "r2"
 
@@ -42,6 +48,7 @@ def _get_s3_client():
             aws_access_key_id=aws_key,
             aws_secret_access_key=aws_secret,
             region_name=aws_region,
+            config=Config(retries={"max_attempts": 8, "mode": "standard"}),
         )
         return client, aws_bucket, aws_region
 
@@ -54,7 +61,39 @@ def upload_file(s3_client, bucket: str, local_path: Path, s3_key: str) -> str:
     For R2 we return the presigned URL as the canonical link (R2 objects
     aren't public by default). For AWS S3 we return the virtual-hosted URL.
     """
-    s3_client.upload_file(str(local_path), bucket, s3_key)
+    size_bytes = local_path.stat().st_size
+    if size_bytes > MAX_SINGLE_UPLOAD_BYTES:
+        raise RuntimeError(
+            f"Checkpoint exceeds the {MAX_SINGLE_UPLOAD_BYTES} byte single-upload limit"
+        )
+
+    # boto3's transfer manager switches to multipart at a low threshold. The
+    # current RunPod environment fails while initiating that multipart request
+    # against R2, before any bytes are sent. LoRA checkpoints fit in R2's 5 GiB
+    # PutObject limit, so stream one signed PUT instead.
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            with local_path.open("rb") as body:
+                s3_client.put_object(
+                    Bucket=bucket,
+                    Key=s3_key,
+                    Body=body,
+                    ContentType="application/octet-stream",
+                )
+            last_error = None
+            break
+        except Exception as error:
+            last_error = error
+            if attempt == 3:
+                raise
+            delay = attempt * 3
+            logger.warning(
+                f"Upload attempt {attempt}/3 failed for {local_path.name}; retrying in {delay}s: {error}",
+            )
+            time.sleep(delay)
+    if last_error:
+        raise last_error
     region = os.environ.get("S3_REGION", "us-east-1")
     if os.environ.get("R2_BUCKET"):
         url = generate_presigned_url(s3_client, bucket, s3_key)
@@ -128,6 +167,21 @@ def maybe_upload_outputs(job: TrainingJob) -> dict:
     Falls back to local paths if S3 is not configured.
     """
     uploads_dir = job.output_dir.parent / UPLOADS_SUBDIR
+    return _upload_outputs_from_dir(uploads_dir, job.output_prefix, job.job_id)
+
+
+def recover_outputs(source_job_id: str, output_prefix: str) -> dict:
+    """Re-upload checkpoints preserved by a completed job without training."""
+    uploads_dir = Path(os.environ.get("VOLUME_ROOT", "/runpod-volume")) / "jobs" / source_job_id / UPLOADS_SUBDIR
+    return _upload_outputs_from_dir(uploads_dir, output_prefix, source_job_id)
+
+
+def _upload_outputs_from_dir(
+    uploads_dir: Path,
+    output_prefix: str | None,
+    fallback_job_id: str,
+) -> dict:
+    """Upload every staged checkpoint from one known _uploads directory."""
 
     # Collect all .safetensors from the uploads staging dir (flat — watcher
     # copies files directly into uploads_dir, not into subdirs).
@@ -152,7 +206,7 @@ def maybe_upload_outputs(job: TrainingJob) -> dict:
     output_files = []
     presigned_urls = []
     for f in found_files:
-        prefix = job.output_prefix or f"lora-outputs/{job.job_id}/"
+        prefix = output_prefix or f"lora-outputs/{fallback_job_id}/"
         s3_key = f"{prefix}{f.name}"
         try:
             url = upload_file(s3_client, bucket, f, s3_key)

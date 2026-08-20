@@ -39,6 +39,7 @@ from config import (
 from log_parser import TrainingProgress, parse_line, report_progress, should_report
 from overrides_translator import steps_per_epoch as _steps_per_epoch
 from uploader import upload_and_presign
+from hervora_progress import HervoraProgressReporter
 
 # Watcher checkpoint patterns (SOURCE_FINDINGS §1). `aitk_lora` == AITK_JOB_NAME.
 _STEP_RE = re.compile(
@@ -256,7 +257,7 @@ def _iter_lines(stream):
 
 
 def _stream_output(proc: subprocess.Popen, progress: TrainingProgress,
-                   label: str) -> list[str]:
+                   label: str, progress_reporter: HervoraProgressReporter) -> list[str]:
     """Merge stdout+stderr into one parse loop (tqdm is on stderr — §2).
 
     Both streams are split on '\\r' and '\\n' (F5) so the carriage-return-only
@@ -281,6 +282,7 @@ def _stream_output(proc: subprocess.Popen, progress: TrainingProgress,
             if updated and should_report(progress):
                 started = True
                 report_progress(progress, label)
+                progress_reporter.send(progress)
                 logger.info(f"[{label}] step={progress.step}/{progress.total_steps} "
                             f"epoch={progress.epoch} loss={progress.loss} "
                             f"{progress.percent:.1f}%")
@@ -300,6 +302,7 @@ def _stream_output(proc: subprocess.Popen, progress: TrainingProgress,
             if updated and should_report(progress):
                 started = True
                 report_progress(progress, label)
+                progress_reporter.send(progress)
 
     stderr_thread.join(timeout=10)
     return tail
@@ -359,6 +362,7 @@ def run_training(job: TrainingJob) -> TrainingResult:
     progress = TrainingProgress(total_steps=total_steps, total_epochs=total_epochs,
                                 steps_per_epoch=steps_per_epoch, job_id=job.job_id,
                                 label=job.model_type)
+    progress_reporter = HervoraProgressReporter(job.progress_webhook_url)
 
     cmd = ["python", RUN_SCRIPT, str(config_path)]
     logger.info(f"[{job.model_type}] Launching: {' '.join(cmd)} (cwd={AI_TOOLKIT_DIR})")
@@ -384,7 +388,7 @@ def run_training(job: TrainingJob) -> TrainingResult:
 
     tail: list[str] = []
     try:
-        tail = _stream_output(proc, progress, job.model_type)
+        tail = _stream_output(proc, progress, job.model_type, progress_reporter)
         proc.wait(timeout=MAX_TRAINING_HOURS * 3600)
     except subprocess.TimeoutExpired:
         logger.warning(f"[{job.model_type}] Exceeded MAX_TRAINING_HOURS, killing")

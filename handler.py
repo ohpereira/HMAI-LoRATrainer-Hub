@@ -1,5 +1,6 @@
 """RunPod serverless entry point — thin orchestrator."""
 
+import re
 import subprocess
 import time
 import traceback
@@ -26,11 +27,15 @@ from dataset import (
 from model_downloader import ensure_aria2c, ensure_model
 from yaml_generator import generate_config
 from trainer import run_training
-from uploader import maybe_upload_outputs
+from uploader import maybe_upload_outputs, recover_outputs
 
 CIVITAI_DOWNLOADER_DIR = Path("/app/CivitAI_Downloader")
 CIVITAI_DOWNLOADER_REPO = "https://github.com/Hearmeman24/CivitAI_Downloader.git"
 HERVORA_CONTRACT_VERSION = "hervora-validation-v2"
+RECOVERY_SOURCE_JOB_ID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-u[0-9]+$",
+    re.IGNORECASE,
+)
 
 
 def _create_workspace(job):
@@ -151,6 +156,36 @@ def _handler_inner(event):
     job = None
 
     try:
+        recovery_source_job_id = raw_input.get("recover_outputs_from_job_id")
+        if recovery_source_job_id is not None:
+            output_prefix = raw_input.get("output_prefix")
+            if (
+                not isinstance(recovery_source_job_id, str)
+                or not RECOVERY_SOURCE_JOB_ID_PATTERN.fullmatch(recovery_source_job_id)
+                or not isinstance(output_prefix, str)
+                or not output_prefix.endswith("/")
+                or output_prefix.startswith("/")
+                or ".." in output_prefix.split("/")
+                or "\\" in output_prefix
+            ):
+                raise PayloadError("Invalid output recovery request")
+            logger.info(f"Recovering staged outputs for {recovery_source_job_id}")
+            upload_result = recover_outputs(recovery_source_job_id, output_prefix)
+            verified_files = [
+                item for item in upload_result.get("output_files", [])
+                if item.get("s3_key")
+            ]
+            if not verified_files:
+                raise RuntimeError("No verified checkpoints were recovered")
+            timing["total_s"] = round(time.time() - t_start, 1)
+            return {
+                "ok": True,
+                "recovery_only": True,
+                "output_files": verified_files,
+                "presigned_urls": upload_result.get("presigned_urls", []),
+                "timing": timing,
+            }
+
         # Never log dataset_zip_url: presigned query parameters are credentials.
         gpu_info = get_gpu_info()
         logger.info(f"GPUs: {gpu_info.count}x {gpu_info.name} ({gpu_info.vram_gb}GB each)")
