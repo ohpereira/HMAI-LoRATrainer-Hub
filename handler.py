@@ -30,6 +30,7 @@ from uploader import maybe_upload_outputs
 
 CIVITAI_DOWNLOADER_DIR = Path("/app/CivitAI_Downloader")
 CIVITAI_DOWNLOADER_REPO = "https://github.com/Hearmeman24/CivitAI_Downloader.git"
+HERVORA_CONTRACT_VERSION = "hervora-validation-v2"
 
 
 def _create_workspace(job):
@@ -139,6 +140,13 @@ def _handler_inner(event):
     timing = {}
     t_start = time.time()
     raw_input = event.get("input", {})
+    if raw_input.get("contract_probe") == HERVORA_CONTRACT_VERSION:
+        logger.info(f"Hervora contract probe: {HERVORA_CONTRACT_VERSION}")
+        return {
+            "ok": True,
+            "contract_version": HERVORA_CONTRACT_VERSION,
+            "supports_validate_only": True,
+        }
     raw_input["job_id"] = event.get("id", "local")
     job = None
 
@@ -190,6 +198,7 @@ def _handler_inner(event):
             result = {
                 "ok": len(unmatched) == 0 and len(orphan_captions) == 0,
                 "validate_only": True,
+                "contract_version": HERVORA_CONTRACT_VERSION,
                 "image_count": img_count,
                 "unmatched_captions": len(unmatched),
                 "orphan_captions": len(orphan_captions),

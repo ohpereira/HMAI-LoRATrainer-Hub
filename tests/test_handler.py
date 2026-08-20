@@ -331,6 +331,28 @@ class TestHandler:
         mock_ensure.assert_not_called()
         mock_train.assert_not_called()
 
+    def test_contract_probe_returns_before_any_worker_action(self):
+        event = {"id": "job-probe", "input": {"contract_probe": "hervora-validation-v2"}}
+        with patch("handler.get_gpu_info") as mock_gpu, \
+             patch("handler.validate_payload") as mock_validate, \
+             patch("handler.download_dataset") as mock_download, \
+             patch("handler.ensure_model") as mock_ensure, \
+             patch("handler.run_training") as mock_train:
+            from handler import handler
+
+            result = handler(event)
+
+        assert result == {
+            "ok": True,
+            "contract_version": "hervora-validation-v2",
+            "supports_validate_only": True,
+        }
+        mock_gpu.assert_not_called()
+        mock_validate.assert_not_called()
+        mock_download.assert_not_called()
+        mock_ensure.assert_not_called()
+        mock_train.assert_not_called()
+
     def test_no_ltx_support(self):
         """LTX model_type is gone — should fail validation."""
         event = {
