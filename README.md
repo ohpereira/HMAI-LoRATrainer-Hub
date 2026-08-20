@@ -162,3 +162,8 @@ Accept the license with the same account that issued the token. `krea2` and
 
 Without this, the job fails during model download with
 `GatedRepoError: 401 Client Error`.
+
+## Deployment note
+
+Publishing a new worker commit triggers a fresh RunPod build for the connected
+`main` branch. This note does not change training behavior.
