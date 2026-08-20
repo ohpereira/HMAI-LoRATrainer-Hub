@@ -99,6 +99,23 @@ class TestValidatePayload:
         with pytest.raises(PayloadError, match="smoke"):
             validate_payload({**valid_payload_sdxl, "smoke": "yes"})
 
+    def test_validate_only_is_boolean_and_exclusive_with_smoke(self, valid_payload_sdxl):
+        job = validate_payload({**valid_payload_sdxl, "validate_only": True})
+        assert job.validate_only is True
+        with pytest.raises(PayloadError, match="validate_only"):
+            validate_payload({**valid_payload_sdxl, "validate_only": "true"})
+        with pytest.raises(PayloadError, match="cannot both be true"):
+            validate_payload({**valid_payload_sdxl, "smoke": True, "validate_only": True})
+
+    def test_output_prefix_must_be_safe(self, valid_payload_sdxl):
+        job = validate_payload({
+            **valid_payload_sdxl,
+            "output_prefix": "private/lora-training/user/job/outputs/",
+        })
+        assert job.output_prefix == "private/lora-training/user/job/outputs/"
+        with pytest.raises(PayloadError):
+            validate_payload({**valid_payload_sdxl, "output_prefix": "../private/"})
+
 
 # ---------------------------------------------------------------------------
 # noise_variant gating (wan2.2 required+enum; non-wan rejected)

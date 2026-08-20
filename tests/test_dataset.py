@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from dataset import download_dataset, extract_zip, validate_dataset
+from dataset import download_dataset, extract_zip, find_orphan_captions, validate_dataset
 
 
 class TestExtractZip:
@@ -35,6 +35,14 @@ class TestExtractZip:
         files = list(dest.iterdir())
         assert len(files) == 10
 
+    def test_path_traversal_is_rejected(self, tmp_path):
+        archive = tmp_path / "unsafe.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("../outside.txt", "blocked")
+
+        with pytest.raises(ValueError, match="unsafe path"):
+            extract_zip(archive, tmp_path / "extracted")
+
 
 class TestValidateDataset:
     def test_all_have_captions(self, sample_dataset_dir):
@@ -55,6 +63,12 @@ class TestValidateDataset:
     def test_mixed_extensions(self, sample_dataset_dir_mixed):
         unmatched = validate_dataset(sample_dataset_dir_mixed)
         assert unmatched == []
+
+    def test_orphan_caption_is_reported(self, tmp_path):
+        (tmp_path / "image.jpg").write_bytes(b"image")
+        (tmp_path / "image.txt").write_text("caption")
+        (tmp_path / "orphan.txt").write_text("caption")
+        assert find_orphan_captions(tmp_path) == ["orphan.txt"]
 
 
 class TestDownloadDataset:

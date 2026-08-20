@@ -16,7 +16,13 @@ from config import (
     TrainingResult,
     validate_payload,
 )
-from dataset import count_dataset_media, download_dataset, extract_zip, validate_dataset
+from dataset import (
+    count_dataset_media,
+    download_dataset,
+    extract_zip,
+    find_orphan_captions,
+    validate_dataset,
+)
 from model_downloader import ensure_aria2c, ensure_model
 from yaml_generator import generate_config
 from trainer import run_training
@@ -137,9 +143,8 @@ def _handler_inner(event):
     job = None
 
     try:
-        # --- Log raw input + GPU info ---
+        # Never log dataset_zip_url: presigned query parameters are credentials.
         gpu_info = get_gpu_info()
-        logger.info(f"Raw input: {raw_input}")
         logger.info(f"GPUs: {gpu_info.count}x {gpu_info.name} ({gpu_info.vram_gb}GB each)")
 
         # --- Validate ---
@@ -177,6 +182,22 @@ def _handler_inner(event):
         # Count media files for the config generator (step/save_every math).
         img_count = count_dataset_media(job.dataset_dir)
         logger.info(f"Dataset media count: {img_count}")
+
+        # --- Dataset validation only: no model download, config or training ---
+        if job.validate_only:
+            orphan_captions = find_orphan_captions(job.dataset_dir)
+            timing["total_s"] = round(time.time() - t_start, 1)
+            result = {
+                "ok": len(unmatched) == 0 and len(orphan_captions) == 0,
+                "validate_only": True,
+                "image_count": img_count,
+                "unmatched_captions": len(unmatched),
+                "orphan_captions": len(orphan_captions),
+                "validator_version": "hervora-dataset-v1",
+                "timing": timing,
+            }
+            _cleanup_dataset(job)
+            return result
 
         # --- Model ---
         t0 = time.time()
@@ -230,6 +251,8 @@ def _handler_inner(event):
         logger.error(f"Payload validation error: {e}")
         return {"ok": False, "error": str(e), "error_type": "VALIDATION"}
     except Exception as e:
+        if job is not None and job.validate_only:
+            _cleanup_dataset(job)
         logger.error(f"Unhandled error: {e}\n{traceback.format_exc()}")
         timing["total_s"] = round(time.time() - t_start, 1)
         return {

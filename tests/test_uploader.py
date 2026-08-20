@@ -2,12 +2,22 @@
 
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock as _MagicMock, patch
 
 import pytest
 
 import config as cfg
 from config import UPLOADS_SUBDIR, TrainingJob, validate_payload
+
+
+def MagicMock(*args, **kwargs):
+    """Provide successful HeadObject metadata for upload verification tests."""
+    client = _MagicMock(*args, **kwargs)
+    client.head_object.return_value = {
+        "ContentLength": 100,
+        "ETag": '"test-etag"',
+    }
+    return client
 
 
 @pytest.fixture(autouse=True)

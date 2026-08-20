@@ -119,6 +119,10 @@ class TrainingJob:
     # WITHOUT downloading the dataset/weights or training. Used for cheap health
     # checks (RunPod Hub tests, endpoint smoke tests).
     smoke: bool = False
+    # Downloads and validates the dataset, then exits before model download/training.
+    validate_only: bool = False
+    # Optional private object prefix supplied by the trusted orchestrator.
+    output_prefix: str | None = None
 
     @property
     def is_wan22(self) -> bool:
@@ -375,7 +379,28 @@ def validate_payload(raw: dict[str, Any]) -> TrainingJob:
     if not isinstance(smoke, bool):
         raise PayloadError("smoke must be a boolean")
 
+    validate_only = raw.get("validate_only", False)
+    if not isinstance(validate_only, bool):
+        raise PayloadError("validate_only must be a boolean")
+    if smoke and validate_only:
+        raise PayloadError("smoke and validate_only cannot both be true")
+
+    output_prefix = raw.get("output_prefix")
+    if output_prefix is not None:
+        if not isinstance(output_prefix, str) or not output_prefix.strip():
+            raise PayloadError("output_prefix must be a non-empty string")
+        output_prefix = output_prefix.strip()
+        if (
+            output_prefix.startswith("/")
+            or not output_prefix.endswith("/")
+            or ".." in output_prefix.split("/")
+            or "\\" in output_prefix
+        ):
+            raise PayloadError("output_prefix must be a safe relative prefix ending in '/'")
+
     job_id = raw.get("job_id", os.environ.get("RUNPOD_POD_ID", "local"))
+    if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
+        raise PayloadError("job_id contains invalid characters")
 
     return TrainingJob(
         job_id=job_id,
@@ -386,6 +411,8 @@ def validate_payload(raw: dict[str, Any]) -> TrainingJob:
         civitai_model_id=civitai_model_id,
         noise_variant=noise_variant,
         smoke=smoke,
+        validate_only=validate_only,
+        output_prefix=output_prefix,
     )
 
 

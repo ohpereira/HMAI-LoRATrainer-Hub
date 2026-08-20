@@ -149,7 +149,7 @@ def _publish(
 
     logger.info(f"New checkpoint: {new_name}, uploading...")
 
-    result = upload_and_presign(renamed, job.job_id)
+    result = upload_and_presign(renamed, job.job_id, job.output_prefix)
     if result:
         progress.ready_loras.append(result)
     else:

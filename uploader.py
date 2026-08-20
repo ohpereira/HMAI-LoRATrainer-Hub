@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import boto3
@@ -78,7 +79,11 @@ def generate_presigned_url(
     return url
 
 
-def upload_and_presign(local_path: Path, job_id: str) -> dict | None:
+def upload_and_presign(
+    local_path: Path,
+    job_id: str,
+    output_prefix: str | None = None,
+) -> dict | None:
     """Upload a single file to S3 and return metadata with presigned URL.
 
     Returns None if S3 is not configured.
@@ -87,14 +92,21 @@ def upload_and_presign(local_path: Path, job_id: str) -> dict | None:
     if s3_client is None:
         return None
 
-    s3_key = f"lora-outputs/{job_id}/{local_path.name}"
+    prefix = output_prefix or f"lora-outputs/{job_id}/"
+    s3_key = f"{prefix}{local_path.name}"
     try:
         url = upload_file(s3_client, bucket, local_path, s3_key)
+        metadata = _verified_object_metadata(s3_client, bucket, local_path, s3_key)
         presigned = generate_presigned_url(s3_client, bucket, s3_key)
         return {
             "filename": local_path.name,
             "url": url,
             "presigned_url": presigned,
+            "s3_key": s3_key,
+            "epoch": _extract_epoch(local_path),
+            "size_bytes": metadata["size_bytes"],
+            "etag": metadata["etag"],
+            "noise_variant": _detect_variant(local_path),
         }
     except Exception as e:
         logger.error(f"Incremental upload failed for {local_path.name}: {e}")
@@ -120,7 +132,7 @@ def maybe_upload_outputs(job: TrainingJob) -> dict:
     # Collect all .safetensors from the uploads staging dir (flat — watcher
     # copies files directly into uploads_dir, not into subdirs).
     if uploads_dir.exists():
-        found_files = sorted(uploads_dir.glob("*.safetensors"))
+        found_files = sorted(uploads_dir.glob("*.safetensors"), key=_checkpoint_sort_key)
     else:
         found_files = []
 
@@ -140,13 +152,19 @@ def maybe_upload_outputs(job: TrainingJob) -> dict:
     output_files = []
     presigned_urls = []
     for f in found_files:
-        s3_key = f"lora-outputs/{job.job_id}/{f.name}"
+        prefix = job.output_prefix or f"lora-outputs/{job.job_id}/"
+        s3_key = f"{prefix}{f.name}"
         try:
             url = upload_file(s3_client, bucket, f, s3_key)
+            metadata = _verified_object_metadata(s3_client, bucket, f, s3_key)
             presigned = generate_presigned_url(s3_client, bucket, s3_key)
             output_files.append({
                 "filename": f.name,
                 "url": url,
+                "s3_key": s3_key,
+                "epoch": _extract_epoch(f),
+                "size_bytes": metadata["size_bytes"],
+                "etag": metadata["etag"],
                 "noise_variant": _detect_variant(f),
             })
             presigned_urls.append(presigned)
@@ -172,3 +190,28 @@ def _detect_variant(filepath: Path) -> str:
     if "low" in name:
         return "low"
     return ""
+
+
+def _extract_epoch(filepath: Path) -> int | None:
+    """Extract a numeric epoch when the checkpoint filename contains one."""
+    match = re.search(r"epoch(\d+)", filepath.stem, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _checkpoint_sort_key(filepath: Path) -> tuple[bool, int, str]:
+    """Sort epoch checkpoints numerically while preserving legacy filenames."""
+    epoch = _extract_epoch(filepath)
+    return (epoch is None, epoch or 0, filepath.name)
+
+
+def _verified_object_metadata(s3_client, bucket: str, local_path: Path, s3_key: str) -> dict:
+    """Verify the uploaded object exists and matches the local checkpoint size."""
+    expected_size = local_path.stat().st_size
+    uploaded = s3_client.head_object(Bucket=bucket, Key=s3_key)
+    size_bytes = int(uploaded.get("ContentLength", 0))
+    etag = str(uploaded.get("ETag", "")).strip('"')
+    if size_bytes != expected_size or not etag:
+        raise RuntimeError("Uploaded object metadata does not match the local checkpoint")
+    return {"size_bytes": size_bytes, "etag": etag}
